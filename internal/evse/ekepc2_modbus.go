@@ -55,6 +55,32 @@ func (c *Client) ReadRegisters(slaveID uint8) (Registers, error) {
 	return regs, err
 }
 
+// WriteMaxChargeCurrent escribe el valor PWM (Amperios * 100) en el registro 109.
+func (c *Client) WriteMaxChargeCurrent(slaveID uint8, value uint16) error {
+	c.handler.SlaveId = slaveID
+	if err := c.EnsureConnected(); err != nil {
+		return err
+	}
+	_, err := c.client.WriteSingleRegister(109, value)
+	if err != nil {
+		c.Close()
+	}
+	return err
+}
+
+// WriteRemoteStartStop escribe 1 (Start) o 2 (Stop) en el registro 89.
+func (c *Client) WriteRemoteStartStop(slaveID uint8, value uint16) error {
+	c.handler.SlaveId = slaveID
+	if err := c.EnsureConnected(); err != nil {
+		return err
+	}
+	_, err := c.client.WriteSingleRegister(89, value)
+	if err != nil {
+		c.Close()
+	}
+	return err
+}
+
 type Registers struct {
 	RemoteStartStop  uint16
 	DeviceAddress    uint16
