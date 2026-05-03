@@ -72,6 +72,8 @@ func (c *Client) readAll() (Registers, error) {
 
 	// Función auxiliar para registros individuales
 	readOne := func(addr uint16) (uint16, error) {
+		// Retardo de seguridad para el timing del UART en ARMv6
+		time.Sleep(20 * time.Millisecond)
 		res, err := c.client.ReadHoldingRegisters(addr, 1)
 		if err != nil || len(res) < 2 {
 			return 0, fmt.Errorf("reg %d (slave %d): %w", addr, slaveID, err)

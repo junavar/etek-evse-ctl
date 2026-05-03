@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"etek-evse-ctl/internal/config"
@@ -12,7 +13,7 @@ import (
 )
 
 var (
-	version = "0.0.17"
+	version = "0.1.0"
 )
 
 func main() {
@@ -77,6 +78,12 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		lastPeriod string
 	)
 
+	// Agrupamos dispositivos por adaptador para evitar colisiones y permitir paralelismo
+	devsByAdapter := make(map[string][]config.EVSEDevice)
+	for _, dev := range cfg.EVSEDevices {
+		devsByAdapter[dev.AdapterPath] = append(devsByAdapter[dev.AdapterPath], dev)
+	}
+
 	// Mapa de clientes Modbus indexados por ruta de adaptador para reutilizar conexiones
 	evseClients := make(map[string]*evse.Client)
 	defer func() {
@@ -95,7 +102,10 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		defer shmReader.Close()
 	}
 
-	for {
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		now := time.Now()
 		period := cfg.GetCurrentTariffPeriod(now)
 		if period != lastPeriod {
@@ -164,40 +174,48 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 				timeout = 500 * time.Millisecond
 			}
 
-			for _, dev := range cfg.EVSEDevices {
-				baud := dev.BaudRate
-				if baud == 0 {
-					baud = 9600
-				}
+			var wg sync.WaitGroup
+			for path, devices := range devsByAdapter {
+				wg.Add(1)
+				go func(adapterPath string, devs []config.EVSEDevice) {
+					defer wg.Done()
 
-				// Obtener o crear el cliente para este adaptador
-				client, ok := evseClients[dev.AdapterPath]
-				if !ok {
-					client = evse.NewClient(dev.AdapterPath, baud, timeout)
-					evseClients[dev.AdapterPath] = client
-				}
+					client, ok := evseClients[adapterPath]
+					if !ok {
+						baud := devs[0].BaudRate
+						if baud == 0 {
+							baud = 9600
+						}
+						client = evse.NewClient(adapterPath, baud, timeout)
+						evseClients[adapterPath] = client
+					}
 
-				regs, err := client.ReadRegisters(dev.ModbusID)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "evse %q (id=%d): %v\n", dev.Name, dev.ModbusID, err)
-					continue
-				}
-				fmt.Printf("EVSE %q (id=%d): reg89=%d reg100=%d reg109=%d reg140=%d reg141=%d reg151=%d reg152=%d\n",
-					dev.Name, dev.ModbusID,
-					regs.RemoteStartStop,
-					regs.DeviceAddress,
-					regs.MaxChargeCurrent,
-					regs.SoftwareVersion,
-					regs.WorkingStatus,
-					regs.RotarySwitchPWM,
-					regs.OutputPWMDuty)
+					for _, dev := range devs {
+						regs, err := client.ReadRegisters(dev.ModbusID)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "evse %q (id=%d): %v\n", dev.Name, dev.ModbusID, err)
+							continue
+						}
+						fmt.Printf("EVSE %q (id=%d): reg89=%d reg100=%d reg109=%d reg140=%d reg141=%d reg151=%d reg152=%d\n",
+							dev.Name, dev.ModbusID,
+							regs.RemoteStartStop,
+							regs.DeviceAddress,
+							regs.MaxChargeCurrent,
+							regs.SoftwareVersion,
+							regs.WorkingStatus,
+							regs.RotarySwitchPWM,
+							regs.OutputPWMDuty)
+						
+						// Pequeño retardo entre esclavos en el mismo bus para estabilizar RS485 en RPi
+						time.Sleep(50 * time.Millisecond)
+					}
+				}(path, devices)
 			}
+			wg.Wait()
 
 			if once {
 				return
 			}
 		}
-
-		time.Sleep(poll)
 	}
 }
