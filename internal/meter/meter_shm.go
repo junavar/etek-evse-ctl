@@ -130,10 +130,14 @@ func (r *Reader) Read() (Data, ReadStatus, ReadDebug, error) {
 	// Validate CRC32 over first 60 bytes.
 	want := binary.LittleEndian.Uint32(buf[60:64])
 	dbg := ReadDebug{WantCRC: want}
+
+	// 0xFFFFFFFF indica un error en la obtención o escritura de los datos en la SHM.
 	if want == 0xFFFFFFFF {
 		return Data{}, ReadErrorFlag, dbg, nil
 	}
-	if want != 0 {
+
+	// Si es 0x00000000 no se emplea CRC. Cualquier otro valor debe verificarse.
+	if want != 0x00000000 {
 		got := crc32.ChecksumIEEE(buf[:60])
 		dbg.GotCRC = got
 		if got != want {
@@ -183,4 +187,3 @@ func shmdt(shmaddr uintptr) error {
 	}
 	return nil
 }
-

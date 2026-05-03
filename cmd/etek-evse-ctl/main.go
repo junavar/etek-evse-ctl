@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	version = "0.0.9"
+	version = "0.0.13"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 	var allSamples bool
 	var debugSHM bool
 
-	flag.StringVar(&configPath, "config", "./etek-evse-ctl.toml", "config TOML path")
+	flag.StringVar(&configPath, "config", "./etek-evse.toml", "config TOML path")
 	flag.BoolVar(&printConfigPowers, "print-config-powers", false, "print P_PUNTA/P_VALLE from config and exit")
 	flag.BoolVar(&printCurrentPeriod, "print-current-period", false, "print current tariff period and exit")
 	flag.BoolVar(&readSHM, "read-shm", true, "read meter data from SysV SHM and print powers")
@@ -76,6 +76,14 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		dataStale  bool
 		lastPeriod string
 	)
+
+	// Mapa de clientes Modbus indexados por ruta de adaptador para reutilizar conexiones
+	evseClients := make(map[string]*evse.Client)
+	defer func() {
+		for _, client := range evseClients {
+			client.Close()
+		}
+	}()
 
 	if readSHM {
 		r, err := meter.NewReader(cfg.SHMMeterRead.Key, cfg.SHMMeterRead.Size)
@@ -161,7 +169,15 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 				if baud == 0 {
 					baud = 9600
 				}
-				regs, err := evse.ReadRegisters(dev.AdapterPath, baud, dev.ModbusID, timeout)
+
+				// Obtener o crear el cliente para este adaptador
+				client, ok := evseClients[dev.AdapterPath]
+				if !ok {
+					client = evse.NewClient(dev.AdapterPath, baud, timeout)
+					evseClients[dev.AdapterPath] = client
+				}
+
+				regs, err := client.ReadRegisters(dev.ModbusID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "evse %q (id=%d): %v\n", dev.Name, dev.ModbusID, err)
 					continue
@@ -185,4 +201,3 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		time.Sleep(poll)
 	}
 }
-

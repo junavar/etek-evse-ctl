@@ -1,7 +1,7 @@
 # Documento de Especificación Técnica — etek-evse-ctl
 
-**Fecha**: 29 de abril de 2026  
-**Versión**: 0.4.6  
+**Fecha**: 3 de mayo de 2026  
+**Versión**: 0.4.7  
 **Estado**: Borrador
 
 ## 1. Arquitectura de Software
@@ -13,7 +13,7 @@
 
 -   **Plataforma objetivo:** Raspberry Pi ARMv6 (Pi Zero / Pi 1).
 
--   **Configuración:** Fichero externo etek-evse-ctl.toml (versionado).
+-   **Configuración:** Fichero externo etek-evse.toml (versionado).
 
 -   **Entrada/salida:** Adaptador USB-RS485 Modbus RTU.
 
@@ -60,7 +60,7 @@ type Data struct {
 	PotenciaMediaImportada   float32 // Media de potencia importada en ventana
 	PotenciaMediaExportada   float32 // Media de potencia exportada en ventana
 	Ventana                  int32   // Tamaño de la ventana de integración (s)
-	Crc32                    uint32  // Checksum. 0: No usado; 0xFFFFFFFF: Error de lectura
+	Crc32                    uint32  // Checksum (crc32.ChecksumIEEE). 0: No usado; 0xFFFFFFFF: Error de lectura
 }
 ```
 
@@ -91,7 +91,7 @@ type Data struct {
 
   100       R/W        Device Address    ID del dispositivo RS485.
 
-  109       R/W        Max Charge        PWM (\$A \\times 100\$). Máx 9000.
+  109       R/W        Max Charge        PWM (*100). Máx 9000.
                        Current           Fallback: 1000 (6A).
 
   140       R          Software Version  v1.1 = 1002; v1.2 = 2310.
