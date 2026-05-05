@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	version = "0.1.4"
+	version = "0.1.18"
 )
 
 func main() {
@@ -127,13 +127,12 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 
 			fresh := meter.IsFresh(d, maxAge, now)
 			if st == meter.ReadValid && d.Timestamp != 0 && fresh {
-				currentData = d
-				changed := d.Timestamp != lastTS
-
 				if dataStale {
 					fmt.Println("WARNING: SHM data is fresh again")
 					dataStale = false
 				}
+				currentData = d
+				changed := d.Timestamp != lastTS
 
 				if changed {
 					if tsStalled {
@@ -162,7 +161,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 					}
 				}
 			} else if !fresh && !dataStale {
-				fmt.Println("WARNING: SHM data is stale")
+				fmt.Printf("WARNING: SHM data is stale or invalid (status: %s)\n", st.String())
 				dataStale = true
 				if st == meter.ReadValid && d.Timestamp != 0 {
 					fmt.Printf("Timestamp=%d ActivePower=%.0f W (media imp=%.0f W, media exp=%.0f W) [STALE]\n",
@@ -183,7 +182,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 			var wg sync.WaitGroup
 			for path, devices := range devsByAdapter {
 				wg.Add(1)
-				go func(adapterPath string, devs []config.EVSEDevice, d meter.Data, p string) {
+				go func(adapterPath string, devs []config.EVSEDevice, d meter.Data, p string, stale bool) {
 					defer wg.Done()
 
 					client, ok := evseClients[adapterPath]
@@ -197,7 +196,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 					}
 
 					// Determinar límite de ICP según periodo actual
-					limitW := float32(cfg.PotenciasICP.PPunta)
+					var limitW float32 = float32(cfg.PotenciasICP.PPunta)
 					if p == "P_VALLE" {
 						limitW = float32(cfg.PotenciasICP.PValle)
 					}
@@ -205,101 +204,87 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 					for _, dev := range devs {
 						regs, err := client.ReadRegisters(dev.ModbusID)
 						if err != nil {
-							fmt.Fprintf(os.Stderr, "evse %q (id=%d): %v\n", dev.Name, dev.ModbusID, err)
+							fmt.Fprintf(os.Stderr, "evse %q (id=%d) read error: %v\n", dev.Name, dev.ModbusID, err)
 							continue
 						}
 
-						// Actualizar estado global
-						statusMu.Lock()
-						evseStatus[dev.ModbusID] = regs
-						statusMu.Unlock()
-
-						if d.Timestamp != 0 && !dataStale {
-							// --- Lógica de Rearranque Automático ---
-							if regs.RemoteStartStop == 2 {
-								// Si hay margen de al menos 1500W (para evitar oscilaciones rápidas)
-								if d.PotenciaMediaImportada < (limitW - 1500) {
-									shouldStart := false
-									if dev.ModbusID == 1 {
-										shouldStart = true
-									} else if dev.ModbusID == 2 {
-										// Solo arrancamos el 2 si el 1 ya está activo
-										statusMu.RLock()
-										st1, exists := evseStatus[1]
-										statusMu.RUnlock()
-										if exists && st1.RemoteStartStop == 1 {
-											shouldStart = true
-										}
-									}
-
-									if shouldStart {
-										fmt.Printf("REARRANQUE: Iniciando %s (Margen disponible)\n", dev.Name)
-										client.WriteRemoteStartStop(dev.ModbusID, 1)
-										regs.RemoteStartStop = 1
-									}
-								}
+						// 1. Inicialización de estado y rampa desde 6A
+						_, initialized := evseStatus[dev.ModbusID]
+						if !initialized {
+							if regs.MaxChargeCurrent != 1000 && regs.RemoteStartStop == 1 {
+								fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name)
+								client.WriteMaxChargeCurrent(dev.ModbusID, 1000)
+								regs.MaxChargeCurrent = 1000
 							}
+							statusMu.Lock()
+							evseStatus[dev.ModbusID] = regs
+							statusMu.Unlock()
+						}
 
-						// Lógica de Control: Status 3 = Cargando, Status 4 = Cargando con ventilación
-						if regs.WorkingStatus == 3 || regs.WorkingStatus == 4 {
-								// 1. Cálculo de margen y objetivo
-								marginW := limitW - d.PotenciaMediaImportada
+						if d.Timestamp != 0 && !stale {
+							// Lógica de Control de PWM (Estados 2 al 5 y 19)
+							if (regs.WorkingStatus >= 2 && regs.WorkingStatus <= 5) || regs.WorkingStatus == 19 {
 								volts := d.Voltage
 								if volts < 180 { volts = 230 }
-								
-								marginA := marginW / volts
-								currentActualA := float32(regs.MaxChargeCurrent) / 100.0
-								targetA := currentActualA + marginA
 
-								// 2. Lógica de Desconexión Secuencial (Stop)
-								// Si estamos por debajo de 6A y seguimos sobrepasando el ICP
-								if targetA < 6.0 && d.PotenciaMediaImportada > limitW {
-									targetA = 6.0
-									
-									// 1º Prioridad de parada: Cargador con ID más alto (Cargador 2)
-									shouldStop := false
-									if dev.ModbusID == 2 {
-										shouldStop = true
-									} else if dev.ModbusID == 1 {
-										// Solo paramos el 1 si el 2 ya no está cargando
-										statusMu.RLock()
-										st2, exists := evseStatus[2]
-										statusMu.RUnlock()
-										if !exists || (st2.WorkingStatus != 3 && st2.WorkingStatus != 4) {
-											shouldStop = true
-										}
-									}
+								// 2. Amperios actuales y Márgenes
+								currentA := (float32(regs.MaxChargeCurrent) / 100.0) * 0.6
+								marginW_mean := limitW - d.PotenciaMediaImportada
+								marginW_inst := limitW - d.ActivePower
 
-									if shouldStop && regs.RemoteStartStop == 1 {
-										fmt.Printf("ICP OVERLOAD: Deteniendo %s secuencialmente\n", dev.Name)
-										client.WriteRemoteStartStop(dev.ModbusID, 2)
-										regs.RemoteStartStop = 2
-									}
+								marginW := marginW_mean
+								if marginW_inst < marginW {
+									marginW = marginW_inst
 								}
 
-								// 3. Aplicar límites de modulación
-								if targetA < 6.0 {
-									targetA = 6.0
-								}
-								hwLimitA := float32(regs.RotarySwitchPWM) / 100.0
-								if targetA > hwLimitA {
-									targetA = hwLimitA
+								// 3. Objetivo ideal
+								idealTargetA := currentA + (marginW / volts)
+								if regs.WorkingStatus != 5 {
+									idealTargetA = 6.0
 								}
 
-								newReg109 := uint16(targetA * 100)
+								// 4. Ritmo y Rampa (Slew Rate)
+								diffA_ideal := idealTargetA - currentA
+								rhythmW := d.PotenciaMediaImportada - d.ActivePower
+								if rhythmW < 0 { rhythmW = -rhythmW }
 
-								// 4. Escribir modulación si el cargador sigue activo
+								dynamicStepA := float32(0.05) + (rhythmW/1000.0)*0.1
+								var stepLimitA float32
+								if diffA_ideal > 0 {
+									stepLimitA = 0.5 // Rampa de subida rápida
+									if dynamicStepA > stepLimitA { stepLimitA = dynamicStepA }
+								} else {
+									stepLimitA = dynamicStepA // Rampa de bajada dinámica
+								}
+
+								diffA := diffA_ideal
+								if diffA > stepLimitA {
+									diffA = stepLimitA
+								}
+								if diffA < -stepLimitA {
+									diffA = -stepLimitA
+								}
+								targetA := currentA + diffA
+
+								// Límites físicos
+								if targetA < 6.0 { targetA = 6.0 }
+								hwLimitA := (float32(regs.RotarySwitchPWM) / 100.0) * 0.6
+								if targetA > hwLimitA { targetA = hwLimitA }
+
+								// 5. Escritura Modbus
+								newReg109 := uint16((targetA / 0.6) * 100.0)
 								if newReg109 != regs.MaxChargeCurrent && regs.RemoteStartStop == 1 {
-									fmt.Printf("MODULANDO %s: %d -> %d (Margen: %.2fW)\n", dev.Name, regs.MaxChargeCurrent, newReg109, marginW)
+									fmt.Printf("MODULANDO %s [%s]: %d -> %d (Status:%d Limit:%.0fW Margin:%.0fW Pace:%.2fA/s)\n",
+										dev.Name, p, regs.MaxChargeCurrent, newReg109, regs.WorkingStatus, limitW, marginW, stepLimitA)
 									if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil {
-										fmt.Fprintf(os.Stderr, "error escribiendo reg 109 en %s: %v\n", dev.Name, errW)
+										fmt.Fprintf(os.Stderr, "Error write reg 109 on %s: %v\n", dev.Name, errW)
 									}
-									regs.MaxChargeCurrent = newReg109 // Actualizar para el print posterior
+									regs.MaxChargeCurrent = newReg109
 								}
 							}
 						}
 
-						fmt.Printf("EVSE %q (id=%d): status=%d curr=%d limit=%d reg152=%d\n",
+						fmt.Printf("EVSE %q (id=%d): status=%d current=%d limit=%d reg152=%d\n",
 							dev.Name, dev.ModbusID,
 							regs.WorkingStatus,
 							regs.MaxChargeCurrent,
@@ -309,7 +294,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						// Pequeño retardo entre esclavos en el mismo bus para estabilizar RS485 en RPi
 						time.Sleep(50 * time.Millisecond)
 					}
-				}(path, devices, currentData, period)
+				}(path, devices, currentData, period, dataStale)
 			}
 			wg.Wait()
 

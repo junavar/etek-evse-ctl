@@ -1,7 +1,7 @@
 # Documento de Especificación Técnica — etek-evse-ctl
 
 **Fecha**: 3 de mayo de 2026  
-**Versión**: 1.0.1  
+**Versión**: 1.0.3  
 **Estado**: Borrador
 
 ## 1. Arquitectura de Software
@@ -88,20 +88,16 @@ type Data struct {
   **Reg**   **Tipo**   **Función**       **Nota Técnica**
   --------- ---------- ----------------- -------------------------------------------
   89        R/W        Remote Start/Stop 1: Start, 2: Stop.
-
   100       R/W        Device Address    ID del dispositivo RS485.
-
   109       R/W        Max Charge        PWM (*100). Máx 9000.
-                       Current           Fallback: 1000 (6A).
-
   140       R          Software Version  v1.1 = 1002; v1.2 = 2310.
-
-  141       R          Working Status    Estado actual (0-19).
-
+  141       R          Working Status    Estado actual (0-19). 
   151       R          Rotary Switch PWM Límite físico (Dial hardware).
-
   152       R          Output PWM Duty   10000 (100%) en estados de espera (1 o 3).
+
   ----------------------------------------------------------------------------------
+
+Estados: 1 desenchufado, 3 enchufado, 5 cargando, 19 parado
 
 ## 4. Lógica de Control y Tarifas (2.0TD)
 
@@ -109,7 +105,7 @@ El programa interrogará a los EVSE cuando cambie el Timestamp en la SHM
 o expire el modbus_timeout_ms.
 
 -   **Validación:** Datos inválidos si Timestamp supera max_data_age_s o
-    si Crc32 == 0xFFFFFFFF.
+    si Crc32 == 0xFFFFFFFF. 
 
 -   **Lógica de Fallback:** Ante datos inválidos o SHM inexistente, se
     forzará el Reg 109 a 1000 (6A).
