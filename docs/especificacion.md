@@ -1,7 +1,7 @@
 # Documento de Especificación Técnica — etek-evse-ctl
 
 **Fecha**: 11 de mayo de 2026  
-**Versión**: 0.0.36  
+**Versión**: 0.0.37  
 **Estado**: Borrador
 
 ## 1. Arquitectura de Software
