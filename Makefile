@@ -21,3 +21,8 @@ git-push:
 	git add .
 	git commit -m "Release version $(VERSION)"
 	git push origin main
+
+tag:
+	@echo "Creando tag v$(VERSION)..."
+	git tag -a v$(VERSION) -m "Release version $(VERSION)"
+	git push origin v$(VERSION)

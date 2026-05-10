@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	version = "0.1.18"
+	version = "0.0.33"
 )
 
 func main() {
@@ -73,14 +73,21 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		shmReader *meter.Reader
 		lastTS    int64
 		currentData meter.Data
+		integratedPower float32
 		maxAge    = time.Duration(cfg.SHMMeterRead.MaxDataAgeS) * time.Second
+		
+		// Buffer circular para integración de potencia (12 muestras)
+		powerHistory = make([]float32, 12)
+		hIdx         int
+		hCount       int
+
 		tsStalled  bool
 		dataStale  bool
 		lastPeriod string
 
-		// Estado compartido para coordinación entre hilos Modbus
 		evseStatus = make(map[uint8]evse.Registers)
 		statusMu   sync.RWMutex
+		clientMu   sync.Mutex
 	)
 
 	// Agrupamos dispositivos por adaptador para evitar colisiones y permitir paralelismo
@@ -111,6 +118,8 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 	defer ticker.Stop()
 
 	for range ticker.C {
+		fmt.Print("\033[H\033[2J") // Borrado de pantalla al inicio de cada ciclo
+
 		now := time.Now()
 		period := cfg.GetCurrentTariffPeriod(now)
 		if period != lastPeriod {
@@ -132,6 +141,14 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 					dataStale = false
 				}
 				currentData = d
+
+				// Actualizar buffer circular con la potencia instantánea
+				powerHistory[hIdx] = d.ActivePower
+				hIdx = (hIdx + 1) % len(powerHistory)
+				if hCount < len(powerHistory) {
+					hCount++
+				}
+
 				changed := d.Timestamp != lastTS
 
 				if changed {
@@ -182,9 +199,10 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 			var wg sync.WaitGroup
 			for path, devices := range devsByAdapter {
 				wg.Add(1)
-				go func(adapterPath string, devs []config.EVSEDevice, d meter.Data, p string, stale bool) {
+				go func(adapterPath string, devs []config.EVSEDevice, d meter.Data, p string, stale bool, pInt float32) {
 					defer wg.Done()
 
+					clientMu.Lock()
 					client, ok := evseClients[adapterPath]
 					if !ok {
 						baud := devs[0].BaudRate
@@ -194,6 +212,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						client = evse.NewClient(adapterPath, baud, timeout)
 						evseClients[adapterPath] = client
 					}
+					clientMu.Unlock()
 
 					// Determinar límite de ICP según periodo actual
 					var limitW float32 = float32(cfg.PotenciasICP.PPunta)
@@ -209,7 +228,9 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						}
 
 						// 1. Inicialización de estado y rampa desde 6A
+						statusMu.RLock()
 						_, initialized := evseStatus[dev.ModbusID]
+						statusMu.RUnlock()
 						if !initialized {
 							if regs.MaxChargeCurrent != 1000 && regs.RemoteStartStop == 1 {
 								fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name)
@@ -227,12 +248,14 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 								volts := d.Voltage
 								if volts < 180 { volts = 230 }
 
-								// 2. Amperios actuales y Márgenes
+								// 2. Amperios actuales y Margen (Basado exclusivamente en la Potencia Integrada)
 								currentA := (float32(regs.MaxChargeCurrent) / 100.0) * 0.6
-								marginW_mean := limitW - d.PotenciaMediaImportada
+
+								// Lógica del "Peor Caso": comparamos margen de potencia integrada e instantánea
+								marginW_int := limitW - pInt
 								marginW_inst := limitW - d.ActivePower
 
-								marginW := marginW_mean
+								marginW := marginW_int
 								if marginW_inst < marginW {
 									marginW = marginW_inst
 								}
@@ -243,18 +266,19 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 									idealTargetA = 6.0
 								}
 
-								// 4. Ritmo y Rampa (Slew Rate)
+								// 4. Ritmo y Rampa (Slew Rate) - Sin usar medias
 								diffA_ideal := idealTargetA - currentA
-								rhythmW := d.PotenciaMediaImportada - d.ActivePower
-								if rhythmW < 0 { rhythmW = -rhythmW }
-
-								dynamicStepA := float32(0.05) + (rhythmW/1000.0)*0.1
 								var stepLimitA float32
+
 								if diffA_ideal > 0 {
-									stepLimitA = 0.5 // Rampa de subida rápida
-									if dynamicStepA > stepLimitA { stepLimitA = dynamicStepA }
+									// Rampa de subida muy lenta: 0.05A por segundo
+									stepLimitA = 0.05
 								} else {
-									stepLimitA = dynamicStepA // Rampa de bajada dinámica
+									// Rampa de bajada suave: 0.1A/s normal, 0.5A/s ante sobrecarga
+									stepLimitA = 0.1
+									if marginW < 0 {
+										stepLimitA = 0.5
+									}
 								}
 
 								diffA := diffA_ideal
@@ -274,13 +298,24 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 								// 5. Escritura Modbus
 								newReg109 := uint16((targetA / 0.6) * 100.0)
 								if newReg109 != regs.MaxChargeCurrent && regs.RemoteStartStop == 1 {
-									fmt.Printf("MODULANDO %s [%s]: %d -> %d (Status:%d Limit:%.0fW Margin:%.0fW Pace:%.2fA/s)\n",
-										dev.Name, p, regs.MaxChargeCurrent, newReg109, regs.WorkingStatus, limitW, marginW, stepLimitA)
+									fmt.Printf("MODULANDO %s [%s]: %d -> %d (Status:%d Limit:%.0fW Pi:%.0fW Pint:%.0fW Margin:%.0fW Pace:%.2fA/s)\n",
+										dev.Name, p, regs.MaxChargeCurrent, newReg109, regs.WorkingStatus, limitW, d.ActivePower, pInt, marginW, stepLimitA)
 									if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil {
 										fmt.Fprintf(os.Stderr, "Error write reg 109 on %s: %v\n", dev.Name, errW)
 									}
 									regs.MaxChargeCurrent = newReg109
 								}
+							}
+						} else {
+							// Lógica de Fallback: Si los datos de SHM no son frescos o válidos,
+							// forzamos el PWM al mínimo de seguridad (6A / 1000).
+							newReg109 := uint16(1000)
+							if regs.MaxChargeCurrent != newReg109 && regs.RemoteStartStop == 1 {
+								fmt.Printf("FALLBACK %s: SHM data stale/invalid. Forcing 6A (PWM 1000)\n", dev.Name)
+								if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil {
+									fmt.Fprintf(os.Stderr, "Error writing fallback PWM on %s: %v\n", dev.Name, errW)
+								}
+								regs.MaxChargeCurrent = newReg109
 							}
 						}
 
@@ -294,7 +329,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						// Pequeño retardo entre esclavos en el mismo bus para estabilizar RS485 en RPi
 						time.Sleep(50 * time.Millisecond)
 					}
-				}(path, devices, currentData, period, dataStale)
+				}(path, devices, currentData, period, dataStale, integratedPower)
 			}
 			wg.Wait()
 
