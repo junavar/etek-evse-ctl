@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	version = "0.0.37"
+	version = "0.0.38"
 )
 func main() {
 	var configPath string
@@ -244,15 +244,11 @@ func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE boo
 						statusMu.RLock()
 						_, initialized := evseStatus[dev.ModbusID]
 						statusMu.RUnlock()
-						if !initialized {
-							if regs.MaxChargeCurrent != 1000 && regs.RemoteStartStop == 1 {
-								fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name) // WriteMaxChargeCurrent is now in package main
-								client.WriteMaxChargeCurrent(dev.ModbusID, 1000)
-								regs.MaxChargeCurrent = 1000
-							}
-							statusMu.Lock()
-							evseStatus[dev.ModbusID] = regs
-							statusMu.Unlock()
+
+						if !initialized && regs.MaxChargeCurrent != 1000 && regs.RemoteStartStop == 1 {
+							fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name)
+							client.WriteMaxChargeCurrent(dev.ModbusID, 1000)
+							regs.MaxChargeCurrent = 1000
 						}
 
 						if d.Timestamp != 0 && !stale {
@@ -332,6 +328,11 @@ func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE boo
 								regs.MaxChargeCurrent = newReg109
 							}
 						}
+
+						// Actualizar el mapa de estado global para que la SHM tenga datos frescos
+						statusMu.Lock()
+						evseStatus[dev.ModbusID] = regs
+						statusMu.Unlock()
 
 						fmt.Printf("EVSE %q (id=%d): status=%d current=%d limit=%d reg152=%d\n",
 							dev.Name, dev.ModbusID,
