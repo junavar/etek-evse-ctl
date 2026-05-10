@@ -20,13 +20,13 @@
 -   **Area de memoria compartida (IPC):**
 
     -   **Creación/Escritura (shm-etek-write):** Estado interno del
-        daemon para la UI. Clave: 0x00001265.
+        daemon para la UI. Clave: 0x00001230.
 
     -   **Lectura (shm-etek-read):** Comandos desde la UI hacia el
-        daemon. Clave: 0x00001266.
+        daemon. Clave: 0x00001231.
 
     -   **Lectura (Medidor):** Memoria compartida System V (64 bytes)
-        para el medidor de red. Clave: 0x00001230.
+        para el medidor de red. Clave: 0x00001264.
 
 -   **Gestión de Logs:** La RPi debe configurarse para que los logs
     residan en memoria volátil (RAM) para evitar el desgaste de la
@@ -36,7 +36,7 @@
 
 Segmento crítico actualizado por un proceso externo (lector Eastron).
 
--   **Clave SHM:** 0x00001230 \| **Flags:** IPC_CREAT (01000).
+-   **Clave SHM:** 0x00001264 \| **Flags:** IPC_CREAT (01000).
 
 -   **Sincronismo:** El programa monitorizará cambios en el campo
     Timestamp para iniciar el ciclo de control (polling activo).
@@ -145,10 +145,6 @@ fallback_pwm = 1000
 key = 0x00001230
 size = 64
 max_data_age_s = 5
-
-[shm_etek_create_write_read]
-key = 0x00001265
-size = 1024
 
 [[evse_device]]
 name = "Cargador Garaje 1"

@@ -56,7 +56,7 @@ func main() {
 	}
 
 	// Inicializar SHM de salida (Status para UI)
-	statusWriter, err := NewStatusWriter(cfg.SHMETEKCreateWriteRead.Key, cfg.SHMETEKCreateWriteRead.Size) // NewStatusWriter is now in package main
+	statusWriter, err := NewStatusWriter(0x1230, 1024) // NewStatusWriter is now in package main
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inicializando SHM Status: %v\n", err)
 	} else {

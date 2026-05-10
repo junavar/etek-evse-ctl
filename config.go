@@ -8,7 +8,6 @@ import (
 type Config struct {
 	General                  GeneralConfig             `toml:"general"`
 	SHMMeterRead             SHMConfig                 `toml:"shm_meter_read"`
-	SHMETEKCreateWriteRead   SHMConfig                 `toml:"shm_etek_create_write_read"`
 	EVSEDevices              []EVSEDevice              `toml:"evse_device"`
 	PotenciasICP             PotenciasICP              `toml:"potencias_ICP"`
 	HorariosLaborables       HorariosPotencia          `toml:"horarios_potencia_laborables"`
