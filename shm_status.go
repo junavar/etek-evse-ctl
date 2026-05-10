@@ -12,12 +12,13 @@ import (
 // EVSEStatus representa el estado de un controlador individual (32 bytes con pad)
 type EVSEStatus struct {
 	ModbusID         uint8
+	Reserved         uint8    // Byte de relleno para alinear los campos uint16
 	WorkingStatus    uint16
 	MaxChargeCurrent uint16
 	OutputPWMDuty    uint16
 	RotarySwitchPWM  uint16
 	RemoteStartStop  uint16
-	Pad              [21]byte
+	Pad              [20]byte // Ajustado para que la estructura sume exactamente 32 bytes
 }
 
 // StatusData es la estructura completa que se escribe en shm-etek-write
@@ -69,15 +70,15 @@ func (sw *StatusWriter) Write(data StatusData) error {
 	}
 
 	allBytes := buf.Bytes()
-	dataLen := int(unsafe.Sizeof(data))
+	n := len(allBytes)
 	
 	// El CRC se calcula sobre los primeros (N-4) bytes
-	checkSum := crc32.ChecksumIEEE(allBytes[:dataLen-4])
-	binary.LittleEndian.PutUint32(allBytes[dataLen-4:], checkSum)
+	checkSum := crc32.ChecksumIEEE(allBytes[:n-4])
+	binary.LittleEndian.PutUint32(allBytes[n-4:], checkSum)
 
 	// Escribir físicamente en la memoria mapeada
 	dst := (*[1024]byte)(unsafe.Pointer(sw.addr))
-	copy(dst[:dataLen], allBytes)
+	copy(dst[:n], allBytes)
 
 	return nil
 }
