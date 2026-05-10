@@ -1,7 +1,7 @@
 # Documento de Especificación Técnica — etek-evse-ctl
 
-**Fecha**: 10 de mayo de 2026  
-**Versión**: 1.1.1  
+**Fecha**: 11 de mayo de 2026  
+**Versión**: 0.0.36  
 **Estado**: Borrador
 
 ## 1. Arquitectura de Software
@@ -26,7 +26,7 @@
         daemon. Clave: 0x00001266.
 
     -   **Lectura (Medidor):** Memoria compartida System V (64 bytes)
-        para el medidor de red.
+        para el medidor de red. Clave: 0x00001230.
 
 -   **Gestión de Logs:** La RPi debe configurarse para que los logs
     residan en memoria volátil (RAM) para evitar el desgaste de la
@@ -36,7 +36,7 @@
 
 Segmento crítico actualizado por un proceso externo (lector Eastron).
 
--   **Clave SHM:** 0x00001264 \| **Flags:** IPC_CREAT (01000).
+-   **Clave SHM:** 0x00001230 \| **Flags:** IPC_CREAT (01000).
 
 -   **Sincronismo:** El programa monitorizará cambios en el campo
     Timestamp para iniciar el ciclo de control (polling activo).
@@ -142,7 +142,7 @@ modbus_timeout_ms = 500
 fallback_pwm = 1000
 
 [shm_meter_read]
-key = 0x00001264
+key = 0x00001230
 size = 64
 max_data_age_s = 5
 
