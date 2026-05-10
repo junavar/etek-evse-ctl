@@ -1,7 +1,7 @@
-.PHONY: build clean deploy
+.PHONY: build clean deploy git-push tag release
 
 BINARY_NAME=etek-evse-ctl-arm6
-VERSION=$(shell grep 'version =' cmd/etek-evse-ctl/main.go | cut -d '\"' -f 2)
+VERSION := $(shell grep 'version =' cmd/etek-evse-ctl/main.go | cut -d '"' -f 2)
 
 build:
 	@echo "Compilando para Raspberry Pi (ARMv6)..."
@@ -26,3 +26,6 @@ tag:
 	@echo "Creando tag v$(VERSION)..."
 	git tag -a v$(VERSION) -m "Release version $(VERSION)"
 	git push origin v$(VERSION)
+
+release: deploy git-push tag
+	@echo "Despliegue y etiquetado de la versión $(VERSION) completado con éxito."

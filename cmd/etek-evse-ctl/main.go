@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	version = "0.0.33"
+	version = "0.0.34"
 )
 
 func main() {
@@ -148,6 +148,13 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 				if hCount < len(powerHistory) {
 					hCount++
 				}
+
+				// Calcular la potencia media integrada en el buffer circular
+				var sum float32
+				for i := 0; i < hCount; i++ {
+					sum += powerHistory[i]
+				}
+				integratedPower = sum / float32(hCount)
 
 				changed := d.Timestamp != lastTS
 
