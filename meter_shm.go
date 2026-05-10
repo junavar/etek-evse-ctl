@@ -1,4 +1,4 @@
-package meter
+package main // Already main, no change needed here
 
 import (
 	"bytes"
@@ -119,7 +119,7 @@ func (r *Reader) Read() (Data, ReadStatus, ReadDebug, error) {
 	}
 
 	// Copy bytes out of SHM to avoid tearing while decoding.
-	b := unsafeBytes(r.addr, r.size)
+	b := unsafeBytes(r.addr, r.size) // Call unsafeBytes directly
 	buf := make([]byte, r.size)
 	copy(buf, b)
 

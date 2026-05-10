@@ -19,10 +19,13 @@
 
 -   **Area de memoria compartida (IPC):**
 
-    -   **Creación/Lectura/escritura:** Área propia para comunicación
-        con futura App Web móvil.
+    -   **Creación/Escritura (shm-etek-write):** Estado interno del
+        daemon para la UI. Clave: 0x00001265.
 
-    -   **Lectura:** Memoria compartida System V (segmento de 64 bytes)
+    -   **Lectura (shm-etek-read):** Comandos desde la UI hacia el
+        daemon. Clave: 0x00001266.
+
+    -   **Lectura (Medidor):** Memoria compartida System V (64 bytes)
         para el medidor de red.
 
 -   **Gestión de Logs:** La RPi debe configurarse para que los logs

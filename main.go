@@ -6,16 +6,11 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	"etek-evse-ctl/internal/config"
-	"etek-evse-ctl/internal/evse"
-	"etek-evse-ctl/internal/meter"
 )
 
 var (
-	version = "0.0.34"
+	version = "0.0.35"
 )
-
 func main() {
 	var configPath string
 	var printConfigPowers bool
@@ -37,11 +32,11 @@ func main() {
 	flag.Parse()
 
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println(version)
+		fmt.Println(version) // version is now defined globally below
 		return
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := Load(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -55,24 +50,32 @@ func main() {
 	}
 
 	if printCurrentPeriod {
-		period := cfg.GetCurrentTariffPeriod(time.Now())
+		period := GetCurrentTariffPeriod(cfg, time.Now())
 		fmt.Printf("Current tariff period: %s\n", period)
 		return
 	}
 
-	runLoop(cfg, readSHM, readEVSE, once, allSamples, debugSHM)
+	// Inicializar SHM de salida (Status para UI)
+	statusWriter, err := NewStatusWriter(cfg.SHMETEKCreateWriteRead.Key, cfg.SHMETEKCreateWriteRead.Size) // NewStatusWriter is now in package main
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error inicializando SHM Status: %v\n", err)
+	} else {
+		defer statusWriter.Close()
+	}
+
+	runLoop(cfg, statusWriter, readSHM, readEVSE, once, allSamples, debugSHM)
 }
 
-func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamples bool, debugSHM bool) {
+func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE bool, once bool, allSamples bool, debugSHM bool) { // Config and StatusWriter are now in package main
 	poll := time.Duration(cfg.General.PollingIntervalMS) * time.Millisecond
 	if poll <= 0 {
 		poll = 1 * time.Second
 	}
 
 	var (
-		shmReader *meter.Reader
-		lastTS    int64
-		currentData meter.Data
+		shmReader *Reader
+		lastTS    int64 // Reader and Data are now in package main
+		currentData Data
 		integratedPower float32
 		maxAge    = time.Duration(cfg.SHMMeterRead.MaxDataAgeS) * time.Second
 		
@@ -85,19 +88,21 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 		dataStale  bool
 		lastPeriod string
 
-		evseStatus = make(map[uint8]evse.Registers)
+		evseStatus = make(map[uint8]Registers) // Registers is now in package main
+		algorithmLimitW float32
+		algorithmMarginW float32
 		statusMu   sync.RWMutex
 		clientMu   sync.Mutex
 	)
 
 	// Agrupamos dispositivos por adaptador para evitar colisiones y permitir paralelismo
-	devsByAdapter := make(map[string][]config.EVSEDevice)
+	devsByAdapter := make(map[string][]EVSEDevice) // EVSEDevice is now in package main
 	for _, dev := range cfg.EVSEDevices {
 		devsByAdapter[dev.AdapterPath] = append(devsByAdapter[dev.AdapterPath], dev)
 	}
 
 	// Mapa de clientes Modbus indexados por ruta de adaptador para reutilizar conexiones
-	evseClients := make(map[string]*evse.Client)
+	evseClients := make(map[string]*Client) // Client is now in package main
 	defer func() {
 		for _, client := range evseClients {
 			client.Close()
@@ -105,7 +110,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 	}()
 
 	if readSHM {
-		r, err := meter.NewReader(cfg.SHMMeterRead.Key, cfg.SHMMeterRead.Size)
+		r, err := NewReader(cfg.SHMMeterRead.Key, cfg.SHMMeterRead.Size) // NewReader is now in package main
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -118,10 +123,10 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 	defer ticker.Stop()
 
 	for range ticker.C {
+		now := time.Now()
 		fmt.Print("\033[H\033[2J") // Borrado de pantalla al inicio de cada ciclo
 
-		now := time.Now()
-		period := cfg.GetCurrentTariffPeriod(now)
+		period := GetCurrentTariffPeriod(cfg, now) // GetCurrentTariffPeriod is now in package main
 		if period != lastPeriod {
 			fmt.Printf("Tariff period changed to: %s\n", period)
 			lastPeriod = period
@@ -134,8 +139,8 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 				os.Exit(1)
 			}
 
-			fresh := meter.IsFresh(d, maxAge, now)
-			if st == meter.ReadValid && d.Timestamp != 0 && fresh {
+			fresh := IsFresh(d, maxAge, now) // IsFresh is now in package main
+			if st == ReadValid && d.Timestamp != 0 && fresh {
 				if dataStale {
 					fmt.Println("WARNING: SHM data is fresh again")
 					dataStale = false
@@ -184,10 +189,10 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						return
 					}
 				}
-			} else if !fresh && !dataStale {
-				fmt.Printf("WARNING: SHM data is stale or invalid (status: %s)\n", st.String())
+			} else if !fresh && !dataStale && d.Timestamp != 0 {
+				fmt.Printf("WARNING: SHM data is stale or invalid (status: %v)\n", st)
 				dataStale = true
-				if st == meter.ReadValid && d.Timestamp != 0 {
+				if st == ReadValid && d.Timestamp != 0 { // ReadValid is now in package main
 					fmt.Printf("Timestamp=%d ActivePower=%.0f W (media imp=%.0f W, media exp=%.0f W) [STALE]\n",
 						d.Timestamp, d.ActivePower, d.PotenciaMediaImportada, d.PotenciaMediaExportada)
 				}
@@ -206,7 +211,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 			var wg sync.WaitGroup
 			for path, devices := range devsByAdapter {
 				wg.Add(1)
-				go func(adapterPath string, devs []config.EVSEDevice, d meter.Data, p string, stale bool, pInt float32) {
+				go func(adapterPath string, devs []EVSEDevice, d Data, p string, stale bool, pInt float32, limit float32) { // EVSEDevice and Data are now in package main
 					defer wg.Done()
 
 					clientMu.Lock()
@@ -216,7 +221,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						if baud == 0 {
 							baud = 9600
 						}
-						client = evse.NewClient(adapterPath, baud, timeout)
+						client = NewClient(adapterPath, baud, timeout) // NewClient is now in package main
 						evseClients[adapterPath] = client
 					}
 					clientMu.Unlock()
@@ -226,9 +231,10 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 					if p == "P_VALLE" {
 						limitW = float32(cfg.PotenciasICP.PValle)
 					}
+					algorithmLimitW = limitW
 
 					for _, dev := range devs {
-						regs, err := client.ReadRegisters(dev.ModbusID)
+						regs, err := client.ReadRegisters(dev.ModbusID) // ReadRegisters is now in package main
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "evse %q (id=%d) read error: %v\n", dev.Name, dev.ModbusID, err)
 							continue
@@ -240,7 +246,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						statusMu.RUnlock()
 						if !initialized {
 							if regs.MaxChargeCurrent != 1000 && regs.RemoteStartStop == 1 {
-								fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name)
+								fmt.Printf("EVSE %q: Inicializando rampa. Forzando 6A (PWM 1000)\n", dev.Name) // WriteMaxChargeCurrent is now in package main
 								client.WriteMaxChargeCurrent(dev.ModbusID, 1000)
 								regs.MaxChargeCurrent = 1000
 							}
@@ -266,6 +272,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 								if marginW_inst < marginW {
 									marginW = marginW_inst
 								}
+								algorithmMarginW = marginW
 
 								// 3. Objetivo ideal
 								idealTargetA := currentA + (marginW / volts)
@@ -306,7 +313,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 								newReg109 := uint16((targetA / 0.6) * 100.0)
 								if newReg109 != regs.MaxChargeCurrent && regs.RemoteStartStop == 1 {
 									fmt.Printf("MODULANDO %s [%s]: %d -> %d (Status:%d Limit:%.0fW Pi:%.0fW Pint:%.0fW Margin:%.0fW Pace:%.2fA/s)\n",
-										dev.Name, p, regs.MaxChargeCurrent, newReg109, regs.WorkingStatus, limitW, d.ActivePower, pInt, marginW, stepLimitA)
+										dev.Name, p, regs.MaxChargeCurrent, newReg109, regs.WorkingStatus, limitW, d.ActivePower, pInt, marginW, stepLimitA) // WriteMaxChargeCurrent is now in package main
 									if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil {
 										fmt.Fprintf(os.Stderr, "Error write reg 109 on %s: %v\n", dev.Name, errW)
 									}
@@ -319,7 +326,7 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 							newReg109 := uint16(1000)
 							if regs.MaxChargeCurrent != newReg109 && regs.RemoteStartStop == 1 {
 								fmt.Printf("FALLBACK %s: SHM data stale/invalid. Forcing 6A (PWM 1000)\n", dev.Name)
-								if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil {
+								if errW := client.WriteMaxChargeCurrent(dev.ModbusID, newReg109); errW != nil { // WriteMaxChargeCurrent is now in package main
 									fmt.Fprintf(os.Stderr, "Error writing fallback PWM on %s: %v\n", dev.Name, errW)
 								}
 								regs.MaxChargeCurrent = newReg109
@@ -336,9 +343,39 @@ func runLoop(cfg *config.Config, readSHM bool, readEVSE bool, once bool, allSamp
 						// Pequeño retardo entre esclavos en el mismo bus para estabilizar RS485 en RPi
 						time.Sleep(50 * time.Millisecond)
 					}
-				}(path, devices, currentData, period, dataStale, integratedPower)
+				}(path, devices, currentData, period, dataStale, integratedPower, algorithmLimitW)
 			}
 			wg.Wait()
+
+			// Escribir estado en SHM para la UI
+			if statusWriter != nil {
+				statusData := StatusData{ // StatusData is now in package main
+					Timestamp:       now.Unix(),
+					ActivePower:     currentData.ActivePower,
+					IntegratedPower: integratedPower,
+					LimitW:          algorithmLimitW,
+					MarginW:         algorithmMarginW,
+					NumControllers:  int32(len(cfg.EVSEDevices)),
+				}
+				
+				statusMu.RLock()
+				idx := 0
+				for _, dev := range cfg.EVSEDevices {
+					if regs, ok := evseStatus[dev.ModbusID]; ok && idx < 4 {
+						statusData.Controllers[idx] = EVSEStatus{ // EVSEStatus is now in package main
+							ModbusID:         dev.ModbusID,
+							WorkingStatus:    regs.WorkingStatus,
+							MaxChargeCurrent: regs.MaxChargeCurrent,
+							OutputPWMDuty:    regs.OutputPWMDuty,
+							RotarySwitchPWM:  regs.RotarySwitchPWM,
+							RemoteStartStop:  regs.RemoteStartStop,
+						}
+						idx++
+					}
+				}
+				statusMu.RUnlock()
+				statusWriter.Write(statusData) // Write is now in package main
+			}
 
 			if once {
 				return

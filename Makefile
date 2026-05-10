@@ -1,11 +1,12 @@
 .PHONY: build clean deploy git-push tag release
 
 BINARY_NAME=etek-evse-ctl-arm6
-VERSION := $(shell grep 'version =' cmd/etek-evse-ctl/main.go | cut -d '"' -f 2)
+VERSION := $(shell grep 'version =' main.go | cut -d '"' -f 2)
 
 build:
 	@echo "Compilando para Raspberry Pi (ARMv6)..."
-	GOOS=linux GOARCH=arm GOARM=6 go build -o $(BINARY_NAME) ./cmd/etek-evse-ctl
+	go mod tidy
+	GOOS=linux GOARCH=arm GOARM=6 GO111MODULE=on go build -o $(BINARY_NAME) .
 
 clean:
 	@if [ -f $(BINARY_NAME) ]; then rm $(BINARY_NAME); fi

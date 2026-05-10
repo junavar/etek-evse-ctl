@@ -1,4 +1,4 @@
-package evse
+package main // Already main, no change needed here
 
 import (
 	"encoding/binary"
