@@ -1,7 +1,7 @@
 # Documento de Especificación Técnica — etek-evse-ctl
 
 **Fecha**: 11 de mayo de 2026  
-**Versión**: 0.0.37  
+**Versión**: 0.0.40  
 **Estado**: Borrador
 
 ## 1. Arquitectura de Software
@@ -24,6 +24,9 @@
 
     -   **Lectura (shm-etek-read):** Comandos desde la UI hacia el
         daemon. Clave: 0x00001231.
+
+    -   **Comandos (shm-etek-commands):** Envío de comandos desde la UI
+        hacia el daemon. Clave: 0x00001231.
 
     -   **Lectura (Medidor):** Memoria compartida System V (64 bytes)
         para el medidor de red. Clave: 0x00001264.
@@ -145,6 +148,37 @@ fallback_pwm = 1000
 key = 0x00001230
 size = 64
 max_data_age_s = 5
+
+## 6. Memoria Compartida de Comandos (shm-etek-commands)
+
+Segmento donde la UI escribe comandos para el daemon.
+
+-   **Clave SHM:** 0x00001231 | **Tamaño:** 64 bytes.
+-   **Inicialización:** Al arrancar `etek-evse-ctl`, la SHM se inicializa con `Action=0`, `Value1=0`, `Value2=0`, `Source=""`, `TimestampTx=current time`, `TimestampRx=current time`.
+-   **Integridad:** CRC32 al final del bloque de datos útiles.
+
+**Estructura de Datos:**
+1.  **Action (4 bytes):** Código de la acción a realizar (ej. 1: Start, 2: Stop, 3: SetPWM).
+    *   **Action 1 (Start):**
+        *   `Value1`: ID Modbus del controlador EVSE a arrancar.
+        *   `Value2`: 0.
+        *   `Source`: "dee-iu" o similar.
+        *   `TimestampTx`: Tiempo de envío del comando.
+        *   `TimestampRx`: Actualizado por `etek-evse-ctl` tras procesar el comando.
+    *   **Action 2 (Stop):**
+        *   `Value1`: ID Modbus del controlador EVSE a detener.
+        *   `Value2`: 0.
+        *   `Source`: "dee-iu" o similar.
+        *   `TimestampTx`: Tiempo de envío del comando.
+        *   `TimestampRx`: Actualizado por `etek-evse-ctl` tras procesar el comando.
+2.  **Value1 (4 bytes):** Primer valor asociado a la acción (ej. ModbusID, PWM).
+3.  **Value2 (4 bytes):** Segundo valor asociado a la acción.
+4.  **TimestampTx (8 bytes):** Tiempo Unix 64-bit cuando el comando fue enviado.
+5.  **Source (24 bytes):** Origen del comando (ej. "dee-iu", "manual").
+6.  **TimestampRx (8 bytes):** Tiempo Unix 64-bit cuando el comando fue procesado por el daemon.
+7.  **Pad (8 bytes):** Relleno para alinear a 64 bytes.
+8.  **Crc32 (4 bytes):** Checksum sobre los campos anteriores.
+
 
 [[evse_device]]
 name = "Cargador Garaje 1"

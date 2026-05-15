@@ -3,14 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
+	"bytes"
 	"os"
 	"sync"
 	"time"
 )
 
 var (
-	version = "0.0.38"
+	version = "0.0.44" // Confirmamos versión 0.0.44
 )
+
 func main() {
 	var configPath string
 	var printConfigPowers bool
@@ -60,20 +62,41 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inicializando SHM Status: %v\n", err)
 	} else {
+		fmt.Printf("SHM Status (0x1230) inicializada.\n")
 		defer statusWriter.Close()
 	}
 
-	runLoop(cfg, statusWriter, readSHM, readEVSE, once, allSamples, debugSHM)
+	commandSHM, err := NewCommandSHM(SHM_COMMAND_KEY, SHM_COMMAND_SIZE)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error inicializando SHM de comandos: %v\n", err)
+		// No salimos, el programa puede seguir funcionando sin la SHM de comandos
+	} else {
+		fmt.Printf("SHM Comandos (0x1231) inicializada.\n")
+		defer commandSHM.Close()
+
+		// REQUERIMIENTO: Inicializar con Action=0, Val1=0, Val2=0, Source="", Timestamps actuales
+		initialCmd := CommandPayload{
+			Action:      0,
+			Value1:      0,
+			Value2:      0,
+			TimestampTx: time.Now().Unix(),
+			TimestampRx: time.Now().Unix(),
+		}
+		// Source se inicializa a ceros (string vacío) automáticamente al ser [24]byte
+		commandSHM.Write(initialCmd)
+	}
+
+	runLoop(cfg, statusWriter, commandSHM, readSHM, readEVSE, once, allSamples, debugSHM)
 }
 
-func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE bool, once bool, allSamples bool, debugSHM bool) { // Config and StatusWriter are now in package main
+func runLoop(cfg *Config, statusWriter *StatusWriter, commandSHM *CommandSHM, readSHM bool, readEVSE bool, once bool, allSamples bool, debugSHM bool) { // Config and StatusWriter are now in package main
 	poll := time.Duration(cfg.General.PollingIntervalMS) * time.Millisecond
 	if poll <= 0 {
 		poll = 1 * time.Second
 	}
 
 	var (
-		shmReader *Reader
+		lastCommandTimestamp int64 // Para rastrear comandos ya procesados
 		lastTS    int64 // Reader and Data are now in package main
 		currentData Data
 		integratedPower float32
@@ -95,6 +118,16 @@ func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE boo
 		clientMu   sync.Mutex
 	)
 
+	// Inicializamos el lector de SHM del medidor UNA SOLA VEZ antes del bucle
+	var shmReader *Reader
+	if readSHM {
+		r, err := NewReader(cfg.SHMMeterRead.Key, cfg.SHMMeterRead.Size)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error conectando a SHM Medidor: %v. Continuando...\n", err)
+		}
+		shmReader = r
+	}
+
 	// Agrupamos dispositivos por adaptador para evitar colisiones y permitir paralelismo
 	devsByAdapter := make(map[string][]EVSEDevice) // EVSEDevice is now in package main
 	for _, dev := range cfg.EVSEDevices {
@@ -104,20 +137,13 @@ func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE boo
 	// Mapa de clientes Modbus indexados por ruta de adaptador para reutilizar conexiones
 	evseClients := make(map[string]*Client) // Client is now in package main
 	defer func() {
+		if shmReader != nil {
+			shmReader.Close()
+		}
 		for _, client := range evseClients {
 			client.Close()
 		}
 	}()
-
-	if readSHM {
-		r, err := NewReader(cfg.SHMMeterRead.Key, cfg.SHMMeterRead.Size) // NewReader is now in package main
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		shmReader = r
-		defer shmReader.Close()
-	}
 
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
@@ -125,6 +151,63 @@ func runLoop(cfg *Config, statusWriter *StatusWriter, readSHM bool, readEVSE boo
 	for range ticker.C {
 		now := time.Now()
 		fmt.Print("\033[H\033[2J") // Borrado de pantalla al inicio de cada ciclo
+
+		// --- Procesar comandos de SHM ---
+		if commandSHM != nil {
+			cmd, st, _, err := commandSHM.Read()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error leyendo SHM de comandos: %v\n", err)
+			} else if st == ReadValid && cmd.TimestampTx != 0 && cmd.TimestampTx > lastCommandTimestamp {
+				fmt.Printf("Comando recibido: Acción=%d, Valor1=%d, Valor2=%d, Origen=%s (Tx: %s)\n",
+					cmd.Action, cmd.Value1, cmd.Value2, string(bytes.Trim(cmd.Source[:], "\x00")), time.Unix(cmd.TimestampTx, 0).Format("15:04:05"))
+				
+				// Lógica para ejecutar el comando
+				switch cmd.Action {
+				case 1: // Start
+					modbusID := uint8(cmd.Value1)
+					fmt.Printf("Procesando comando START para EVSE Modbus ID: %d\n", modbusID)
+					// Encontrar el cliente Modbus para este EVSE
+					for _, dev := range cfg.EVSEDevices {
+						if dev.ModbusID == modbusID {
+							clientMu.Lock()
+							client, ok := evseClients[dev.AdapterPath]
+							clientMu.Unlock()
+							if ok {
+								if err := client.WriteRemoteStartStop(modbusID, 1); err != nil {
+									fmt.Fprintf(os.Stderr, "Error al enviar START a EVSE %d: %v\n", modbusID, err)
+								}
+							}
+							break
+						}
+					}
+				case 2: // Stop
+					modbusID := uint8(cmd.Value1)
+					fmt.Printf("Procesando comando STOP para EVSE Modbus ID: %d\n", modbusID)
+					for _, dev := range cfg.EVSEDevices {
+						if dev.ModbusID == modbusID {
+							clientMu.Lock()
+							client, ok := evseClients[dev.AdapterPath]
+							clientMu.Unlock()
+							if ok {
+								client.WriteMaxChargeCurrent(modbusID, 1000) // Forzar 6A antes de detener
+								if err := client.WriteRemoteStartStop(modbusID, 2); err != nil {
+									fmt.Fprintf(os.Stderr, "Error al enviar STOP a EVSE %d: %v\n", modbusID, err)
+								}
+							}
+							break
+						}
+					}
+				}
+
+				// Actualizar el comando en la SHM para indicar que ha sido procesado
+				cmd.Action = 0 // Resetear la acción
+				cmd.TimestampRx = now.Unix()
+				if err := commandSHM.Write(cmd); err != nil {
+					fmt.Fprintf(os.Stderr, "Error al escribir comando procesado en SHM: %v\n", err)
+				}
+				lastCommandTimestamp = cmd.TimestampTx
+			}
+		}
 
 		period := GetCurrentTariffPeriod(cfg, now) // GetCurrentTariffPeriod is now in package main
 		if period != lastPeriod {

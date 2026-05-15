@@ -1,32 +1,48 @@
-.PHONY: build clean deploy git-push tag release
+# Variables de despliegue
+RPI_USER = pi
+RPI_IP   = 192.168.1.153
+RPI_DEST = /home/pi/
 
-BINARY_NAME=etek-evse-ctl-arm6
-VERSION := $(shell grep 'version =' main.go | cut -d '"' -f 2)
+# Variables de GitHub
+GITHUB_REPO = https://github.com/junavar/etek-evse-ctl.git
+GITHUB_BRANCH = main
+
+BINARY_NAME = etek-evse-ctl-arm6
+GO_VARS = GOOS=linux GOARCH=arm GOARM=6 GO111MODULE=on
+
+# Extraer la versión desde la constante en main.go (nótese 'version' en minúscula)
+VERSION = $(shell grep 'version =' main.go | head -n 1 | cut -d '"' -f 2)
+
+.PHONY: all build deploy clean push_github version init_repo
+
+all: build
 
 build:
-	@echo "Compilando para Raspberry Pi (ARMv6)..."
-	go mod tidy
-	GOOS=linux GOARCH=arm GOARM=6 GO111MODULE=on go build -o $(BINARY_NAME) .
+	@echo "Compilando $(BINARY_NAME) v$(VERSION) para ARMv6..."
+	$(GO_VARS) go build -o $(BINARY_NAME) .
 
-clean:
-	@if [ -f $(BINARY_NAME) ]; then rm $(BINARY_NAME); fi
+init_repo:
+	git init
+	git remote add origin $(GITHUB_REPO)
+	git branch -M $(GITHUB_BRANCH)
+	@echo "Repositorio inicializado y vinculado a $(GITHUB_REPO)"
 
-deploy: build
-	@echo "Enviando binario a la Raspberry Pi..."
-	# Sustituye 'pi@raspberrypi.local' por tu usuario e IP real
-	scp $(BINARY_NAME) pi@192.168.1.153:/home/pi/
-	@echo "Hecho. El binario está en /home/pi/$(BINARY_NAME)"
-
-git-push:
-	@echo "Subiendo versión $(VERSION) a GitHub..."
-	git add .
-	git commit -m "Release version $(VERSION)"
-	git push origin main
-
-tag:
-	@echo "Creando tag v$(VERSION)..."
-	git tag -a v$(VERSION) -m "Release version $(VERSION)"
+push_github:
+	@read -p "Introduce el mensaje de commit: " commit_message; \
+	git add .; \
+	git commit -m "$$commit_message"; \
+	git tag -a v$(VERSION) -m "Release v$(VERSION)"; \
+	git push origin $(GITHUB_BRANCH); \
 	git push origin v$(VERSION)
 
-release: deploy git-push tag
-	@echo "Despliegue y etiquetado de la versión $(VERSION) completado con éxito."
+deploy: build
+	@echo "Copiando binario a la Raspberry Pi..."
+	scp $(BINARY_NAME) $(RPI_USER)@$(RPI_IP):$(RPI_DEST)
+	@echo "Despliegue de etek-evse-ctl completado."
+
+clean:
+	rm -f $(BINARY_NAME)
+	@echo "Limpieza completada."
+
+version:
+	@echo "Versión actual: $(VERSION)"
