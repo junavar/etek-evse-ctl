@@ -3,6 +3,7 @@ version = "1.0"
 polling_interval_ms = 1000
 modbus_timeout_ms = 500
 fallback_pwm = 1000
+max_battery_discharge_w = 3000
 
 [shm_meter_read]
 key = 0x00001264
@@ -23,8 +24,8 @@ adapter_path = "/dev/serial/by-path/platform-20980000.usb-usb-0:1.2:1.0-port0"
 baud_rate = 9600
 
 [potencias_ICP]
-P_PUNTA = 4599
-P_VALLE = 4600
+P_PUNTA = 4601
+P_VALLE = 4599
 
 [horarios_potencia_laborables]
 intervalos = [

@@ -8,6 +8,7 @@ import (
 type Config struct {
 	General                  GeneralConfig             `toml:"general"`
 	SHMMeterRead             SHMConfig                 `toml:"shm_meter_read"`
+	SHMDeyeRead              SHMConfig                 `toml:"shm_deye_read"`
 	EVSEDevices              []EVSEDevice              `toml:"evse_device"`
 	PotenciasICP             PotenciasICP              `toml:"potencias_ICP"`
 	HorariosLaborables       HorariosPotencia          `toml:"horarios_potencia_laborables"`
@@ -18,6 +19,7 @@ type GeneralConfig struct {
 	PollingIntervalMS int `toml:"polling_interval_ms"`
 	ModbusTimeoutMS    int `toml:"modbus_timeout_ms"`
 	FallbackPWM       int `toml:"fallback_pwm"`
+	MaxBatteryDischargeW int `toml:"max_battery_discharge_w"`
 }
 
 type SHMConfig struct {
